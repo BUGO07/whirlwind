@@ -1,34 +1,9 @@
-// ECS - the naive way
-
 use wgpu::naga::FastHashMap;
 
-#[derive(Clone, Copy)]
-pub struct Entity(usize);
-
-impl Entity {
-    pub fn insert<T: Component + 'static>(self, component: T, world: &mut World) -> Self {
-        world.add_component(self, component);
-        self
-    }
-    pub fn remove<T: Component + 'static>(self, world: &mut World) -> Self {
-        world.remove_component::<T>(self);
-        self
-    }
-}
-
-pub trait Component: std::any::Any + std::fmt::Debug {
-    fn as_any(&self) -> &dyn std::any::Any;
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any;
-}
-
-impl dyn Component {
-    fn downcast_ref<T: std::any::Any>(&self) -> Option<&T> {
-        self.as_any().downcast_ref()
-    }
-    fn downcast_mut<T: std::any::Any>(&mut self) -> Option<&mut T> {
-        self.as_any_mut().downcast_mut()
-    }
-}
+use crate::ecs::{
+    component::Component,
+    entity::{Entity, EntityWorld},
+};
 
 type EntityComponents = Option<Box<dyn Component>>;
 type SystemFn = fn(&mut World);
@@ -40,51 +15,6 @@ pub struct World {
     schedules: FastHashMap<&'static str, Vec<SystemFn>>,
 }
 
-pub struct EntityWorld<'a> {
-    world: &'a mut World,
-    entity: Entity,
-}
-
-impl EntityWorld<'_> {
-    pub fn insert<T: Component + 'static>(self, component: T) -> Self {
-        self.world.add_component(self.entity, component);
-        self
-    }
-
-    pub fn remove<T: Component + 'static>(self) -> Self {
-        self.world.remove_component::<T>(self.entity);
-        self
-    }
-
-    pub fn id(self) -> Entity {
-        self.entity
-    }
-
-    pub fn despawn(self) {
-        self.world.despawn(self.entity);
-    }
-
-    pub fn get_component<T: Component + 'static>(&self) -> Option<&T> {
-        self.world.get_component::<T>(self.entity)
-    }
-
-    pub fn get_component_mut<T: Component + 'static>(&mut self) -> Option<&mut T> {
-        self.world.get_component_mut::<T>(self.entity)
-    }
-
-    pub fn component<T: Component + 'static>(&self) -> &T {
-        self.get_component::<T>().expect("Component not found")
-    }
-
-    pub fn component_mut<T: Component + 'static>(&mut self) -> &mut T {
-        self.get_component_mut::<T>().expect("Component not found")
-    }
-
-    pub fn print_components(&self) {
-        self.world.print_components(self.entity);
-    }
-}
-
 impl World {
     pub fn new() -> Self {
         Self::default()
@@ -92,7 +22,9 @@ impl World {
 
     pub fn register_component<T: Component + 'static>(&mut self) {
         let type_name = std::any::type_name::<T>();
-        self.components.insert(type_name, Vec::new());
+        let len = self.components.values().next().map_or(0, |v| v.len());
+        self.components
+            .insert(type_name, (0..len).map(|_| None).collect());
     }
 
     pub fn init_resource<T: Component + Default + 'static>(&mut self) {
@@ -168,6 +100,9 @@ impl World {
         let type_name = std::any::type_name::<T>();
         if let Some(components) = self.components.get_mut(type_name) {
             components[entity.0] = Some(Box::new(component));
+        } else {
+            self.register_component::<T>();
+            self.add_component(entity, component);
         }
     }
 
@@ -175,6 +110,8 @@ impl World {
         let type_name = std::any::type_name::<T>();
         if let Some(components) = self.components.get_mut(type_name) {
             components[entity.0] = None;
+        } else {
+            self.register_component::<T>();
         }
     }
 
@@ -204,6 +141,79 @@ impl World {
         }
     }
 
+    pub fn query<T: Component + 'static>(&self) -> Vec<(Entity, &T)> {
+        let type_name = std::any::type_name::<T>();
+        if let Some(components) = self.components.get(type_name) {
+            components
+                .iter()
+                .enumerate()
+                .filter_map(|(index, component)| {
+                    component
+                        .as_ref()
+                        .and_then(|c| c.downcast_ref::<T>())
+                        .map(|c| (Entity(index), c))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn query_mut<T: Component + 'static>(&mut self) -> Vec<(Entity, &mut T)> {
+        let type_name = std::any::type_name::<T>();
+        if let Some(components) = self.components.get_mut(type_name) {
+            components
+                .iter_mut()
+                .enumerate()
+                .filter_map(|(index, component)| {
+                    component
+                        .as_mut()
+                        .and_then(|c| c.downcast_mut::<T>())
+                        .map(|c| (Entity(index), c))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn get_single<T: Component + 'static>(&self) -> Option<&T> {
+        let type_name = std::any::type_name::<T>();
+        let components = self.components.get(type_name)?;
+        if components.len() != 1 {
+            None
+        } else {
+            components
+                .iter()
+                .filter_map(|c| c.as_ref()?.downcast_ref::<T>())
+                .next()
+        }
+    }
+
+    pub fn get_single_mut<T: Component + 'static>(&mut self) -> Option<&mut T> {
+        let type_name = std::any::type_name::<T>();
+        let components = self.components.get_mut(type_name)?;
+        if components.len() != 1 {
+            None
+        } else {
+            components
+                .iter_mut()
+                .filter_map(|c| c.as_mut()?.downcast_mut::<T>())
+                .next()
+        }
+    }
+
+    pub fn single<T: Component + 'static>(&self) -> &T {
+        self.get_single::<T>()
+            .expect("Expected exactly one component")
+    }
+
+    pub fn single_mut<T: Component + 'static>(&mut self) -> &mut T {
+        self.get_single_mut::<T>()
+            .expect("Expected exactly one component")
+    }
+
+    // TODO: don't use strings
     pub fn register_schedule(&mut self, name: &'static str) {
         self.schedules.insert(name, Vec::new());
     }
